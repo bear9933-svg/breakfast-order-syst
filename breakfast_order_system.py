@@ -1,11 +1,18 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
+from typing import Optional
 
 try:
     import win32print  # type: ignore
 except ImportError:
     win32print = None
+
+try:
+    import serial  # type: ignore
+    import serial.tools.list_ports  # type: ignore
+except ImportError:
+    serial = None
 
 
 class BreakfastOrderSystem:
@@ -32,20 +39,65 @@ class BreakfastOrderSystem:
         self.qty_vars: dict[str, tk.StringVar] = {}
         self.total_var = tk.StringVar(value="總金額：$0")
         self.printer_var = tk.StringVar(value="(使用預設印表機)")
+        self.bt_port_var = tk.StringVar(value="(未選擇藍牙 COM)")
         self.auto_cut_var = tk.BooleanVar(value=True)
         self.order_counter = 1
         self.last_receipt_text = ""
         self.receipt_paper_width = 32
 
+        self._setup_styles()
         self._build_ui()
 
+    def _setup_styles(self) -> None:
+        style = ttk.Style()
+        style.theme_use("clam")
+
+        self.root.configure(bg="#fff5f2")
+
+        style.configure("App.TFrame", background="#fff5f2")
+        style.configure("Card.TLabelframe", background="#fffdf7", borderwidth=2, relief="solid")
+        style.configure(
+            "Card.TLabelframe.Label",
+            background="#fffdf7",
+            foreground="#d94841",
+            font=("Microsoft JhengHei", 11, "bold"),
+        )
+        style.configure(
+            "Header.TLabel",
+            background="#ff7a59",
+            foreground="#ffffff",
+            font=("Microsoft JhengHei", 15, "bold"),
+            padding=(10, 8),
+        )
+        style.configure(
+            "SubHeader.TLabel",
+            background="#fffdf7",
+            foreground="#6b2d2d",
+            font=("Microsoft JhengHei", 11, "bold"),
+        )
+        style.configure("Total.TLabel", background="#fffdf7", foreground="#7b2cbf", font=("Microsoft JhengHei", 14, "bold"))
+        style.configure("Hot.TButton", font=("Microsoft JhengHei", 10, "bold"), padding=(8, 6))
+        style.map(
+            "Hot.TButton",
+            background=[("active", "#ff8c42"), ("!active", "#ff6b6b")],
+            foreground=[("disabled", "#f8d7da"), ("!disabled", "#ffffff")],
+        )
+
     def _build_ui(self) -> None:
+        header = ttk.Label(
+            self.root,
+            text="早安! 早餐店點餐系統",
+            style="Header.TLabel",
+            anchor="center",
+        )
+        header.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 0), sticky="ew")
+
         self.root.columnconfigure(0, weight=3)
         self.root.columnconfigure(1, weight=2)
-        self.root.rowconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
 
-        left_frame = ttk.LabelFrame(self.root, text="菜單")
-        left_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        left_frame = ttk.LabelFrame(self.root, text="菜單", style="Card.TLabelframe")
+        left_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
         left_frame.columnconfigure(0, weight=4)
         left_frame.columnconfigure(1, weight=2)
         left_frame.columnconfigure(2, weight=2)
@@ -87,24 +139,34 @@ class BreakfastOrderSystem:
             qty_spin.bind("<KeyRelease>", lambda _event: self._update_total())
             qty_spin.bind("<FocusOut>", lambda _event: self._normalize_quantity())
 
-        right_frame = ttk.LabelFrame(self.root, text="訂單資訊")
-        right_frame.grid(row=0, column=1, padx=(0, 10), pady=10, sticky="nsew")
+        right_frame = ttk.LabelFrame(self.root, text="訂單資訊", style="Card.TLabelframe")
+        right_frame.grid(row=1, column=1, padx=(0, 10), pady=10, sticky="nsew")
         right_frame.columnconfigure(0, weight=1)
         right_frame.rowconfigure(1, weight=1)
 
         ttk.Label(
             right_frame,
             text="已選餐點",
-            font=("Microsoft JhengHei", 11, "bold"),
+            style="SubHeader.TLabel",
         ).grid(row=0, column=0, padx=10, pady=(10, 6), sticky="w")
 
-        self.order_text = tk.Text(right_frame, height=16, width=36, state="disabled")
+        self.order_text = tk.Text(
+            right_frame,
+            height=16,
+            width=36,
+            state="disabled",
+            bg="#fff9ed",
+            fg="#4b3f72",
+            relief="flat",
+            font=("Consolas", 11),
+        )
         self.order_text.grid(row=1, column=0, padx=10, pady=6, sticky="nsew")
 
         printer_frame = ttk.Frame(right_frame)
         printer_frame.grid(row=2, column=0, padx=10, pady=(4, 6), sticky="ew")
         printer_frame.columnconfigure(0, weight=1)
         printer_frame.columnconfigure(1, weight=0)
+        printer_frame.columnconfigure(2, weight=0)
 
         self.printer_combo = ttk.Combobox(
             printer_frame,
@@ -115,40 +177,52 @@ class BreakfastOrderSystem:
         ttk.Button(printer_frame, text="重新整理印表機", command=self._refresh_printers).grid(
             row=0, column=1, sticky="e"
         )
+        self.bt_port_combo = ttk.Combobox(
+            printer_frame,
+            textvariable=self.bt_port_var,
+            state="readonly",
+        )
+        self.bt_port_combo.grid(row=1, column=0, padx=(0, 6), pady=(6, 0), sticky="ew")
+        ttk.Button(printer_frame, text="掃描藍牙 COM", command=self._refresh_bluetooth_ports).grid(
+            row=1, column=1, pady=(6, 0), sticky="e"
+        )
+        ttk.Button(printer_frame, text="藍牙列印", command=self._print_receipt_via_bluetooth).grid(
+            row=1, column=2, padx=(6, 0), pady=(6, 0), sticky="e"
+        )
         ttk.Checkbutton(
             printer_frame,
             text="列印後自動切紙",
             variable=self.auto_cut_var,
-        ).grid(row=1, column=0, columnspan=2, pady=(6, 0), sticky="w")
+        ).grid(row=2, column=0, columnspan=3, pady=(6, 0), sticky="w")
 
         ttk.Label(
             right_frame,
             textvariable=self.total_var,
-            font=("Microsoft JhengHei", 14, "bold"),
-            foreground="#1144aa",
+            style="Total.TLabel",
         ).grid(row=3, column=0, padx=10, pady=10, sticky="e")
 
         btn_frame = ttk.Frame(right_frame)
         btn_frame.grid(row=4, column=0, padx=10, pady=(0, 10), sticky="ew")
         btn_frame.columnconfigure((0, 1, 2, 3, 4), weight=1)
 
-        ttk.Button(btn_frame, text="更新明細", command=self._refresh_order_details).grid(
+        ttk.Button(btn_frame, text="更新明細", command=self._refresh_order_details, style="Hot.TButton").grid(
             row=0, column=0, padx=4, pady=4, sticky="ew"
         )
-        ttk.Button(btn_frame, text="清空", command=self._clear_order).grid(
+        ttk.Button(btn_frame, text="清空", command=self._clear_order, style="Hot.TButton").grid(
             row=0, column=1, padx=4, pady=4, sticky="ew"
         )
-        ttk.Button(btn_frame, text="列印小白單", command=self._print_receipt).grid(
+        ttk.Button(btn_frame, text="列印小白單", command=self._print_receipt, style="Hot.TButton").grid(
             row=0, column=2, padx=4, pady=4, sticky="ew"
         )
-        ttk.Button(btn_frame, text="重印上一筆", command=self._reprint_last_receipt).grid(
+        ttk.Button(btn_frame, text="重印上一筆", command=self._reprint_last_receipt, style="Hot.TButton").grid(
             row=0, column=3, padx=4, pady=4, sticky="ew"
         )
-        ttk.Button(btn_frame, text="結帳", command=self._checkout).grid(
+        ttk.Button(btn_frame, text="結帳", command=self._checkout, style="Hot.TButton").grid(
             row=0, column=4, padx=4, pady=4, sticky="ew"
         )
 
         self._refresh_printers()
+        self._refresh_bluetooth_ports()
         self._update_total()
         self._refresh_order_details()
 
@@ -238,6 +312,25 @@ class BreakfastOrderSystem:
         if self.printer_var.get() not in options:
             self.printer_var.set(options[0])
 
+    def _refresh_bluetooth_ports(self) -> None:
+        options = ["(未選擇藍牙 COM)"]
+        if serial is not None:
+            for port in serial.tools.list_ports.comports():
+                desc = (port.description or "").lower()
+                hwid = (port.hwid or "").lower()
+                if "bluetooth" in desc or "bth" in hwid or "standard serial over bluetooth" in desc:
+                    options.append(f"{port.device} - {port.description}")
+
+        self.bt_port_combo["values"] = options
+        if self.bt_port_var.get() not in options:
+            self.bt_port_var.set(options[0])
+
+    def _get_selected_bt_device(self) -> Optional[str]:
+        value = self.bt_port_var.get().strip()
+        if not value or value == "(未選擇藍牙 COM)":
+            return None
+        return value.split(" - ", 1)[0].strip()
+
     def _send_to_printer(self, receipt_text: str) -> None:
         if win32print is None:
             raise RuntimeError(
@@ -275,6 +368,37 @@ class BreakfastOrderSystem:
     def _print_receipt_text(self, receipt_text: str) -> None:
         self._send_to_printer(receipt_text)
         self.last_receipt_text = receipt_text
+
+    def _send_to_bluetooth_com(self, receipt_text: str) -> None:
+        if serial is None:
+            raise RuntimeError(
+                "尚未安裝 pyserial，無法藍牙列印。\n請先執行：python -m pip install pyserial"
+            )
+
+        device = self._get_selected_bt_device()
+        if not device:
+            raise RuntimeError("請先選擇藍牙 COM 埠，再進行藍牙列印。")
+
+        payload = self._build_print_payload(receipt_text)
+        # 9600 is a common default for Bluetooth ESC/POS adapters.
+        with serial.Serial(device, baudrate=9600, timeout=2) as ser:
+            ser.write(payload)
+            ser.flush()
+
+    def _print_receipt_via_bluetooth(self) -> None:
+        self._normalize_quantity()
+        details, total = self._collect_order()
+        if not details:
+            messagebox.showwarning("提醒", "目前沒有可列印的訂單。")
+            return
+
+        receipt_text = self._build_receipt_text(details, total)
+        try:
+            self._send_to_bluetooth_com(receipt_text)
+            self.last_receipt_text = receipt_text
+            messagebox.showinfo("藍牙列印成功", "已送出列印到藍牙 COM 裝置。")
+        except Exception as exc:
+            messagebox.showerror("藍牙列印失敗", f"無法列印：\n{exc}")
 
     def _reprint_last_receipt(self) -> None:
         if not self.last_receipt_text:
