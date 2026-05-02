@@ -1,5 +1,11 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+from datetime import datetime
+
+try:
+    import win32print  # type: ignore
+except ImportError:
+    win32print = None
 
 
 class BreakfastOrderSystem:
@@ -25,6 +31,11 @@ class BreakfastOrderSystem:
         self.item_vars: dict[str, tk.BooleanVar] = {}
         self.qty_vars: dict[str, tk.StringVar] = {}
         self.total_var = tk.StringVar(value="總金額：$0")
+        self.printer_var = tk.StringVar(value="(使用預設印表機)")
+        self.auto_cut_var = tk.BooleanVar(value=True)
+        self.order_counter = 1
+        self.last_receipt_text = ""
+        self.receipt_paper_width = 32
 
         self._build_ui()
 
@@ -90,16 +101,36 @@ class BreakfastOrderSystem:
         self.order_text = tk.Text(right_frame, height=16, width=36, state="disabled")
         self.order_text.grid(row=1, column=0, padx=10, pady=6, sticky="nsew")
 
+        printer_frame = ttk.Frame(right_frame)
+        printer_frame.grid(row=2, column=0, padx=10, pady=(4, 6), sticky="ew")
+        printer_frame.columnconfigure(0, weight=1)
+        printer_frame.columnconfigure(1, weight=0)
+
+        self.printer_combo = ttk.Combobox(
+            printer_frame,
+            textvariable=self.printer_var,
+            state="readonly",
+        )
+        self.printer_combo.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        ttk.Button(printer_frame, text="重新整理印表機", command=self._refresh_printers).grid(
+            row=0, column=1, sticky="e"
+        )
+        ttk.Checkbutton(
+            printer_frame,
+            text="列印後自動切紙",
+            variable=self.auto_cut_var,
+        ).grid(row=1, column=0, columnspan=2, pady=(6, 0), sticky="w")
+
         ttk.Label(
             right_frame,
             textvariable=self.total_var,
             font=("Microsoft JhengHei", 14, "bold"),
             foreground="#1144aa",
-        ).grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        ).grid(row=3, column=0, padx=10, pady=10, sticky="e")
 
         btn_frame = ttk.Frame(right_frame)
-        btn_frame.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
-        btn_frame.columnconfigure((0, 1, 2), weight=1)
+        btn_frame.grid(row=4, column=0, padx=10, pady=(0, 10), sticky="ew")
+        btn_frame.columnconfigure((0, 1, 2, 3, 4), weight=1)
 
         ttk.Button(btn_frame, text="更新明細", command=self._refresh_order_details).grid(
             row=0, column=0, padx=4, pady=4, sticky="ew"
@@ -107,10 +138,17 @@ class BreakfastOrderSystem:
         ttk.Button(btn_frame, text="清空", command=self._clear_order).grid(
             row=0, column=1, padx=4, pady=4, sticky="ew"
         )
-        ttk.Button(btn_frame, text="結帳", command=self._checkout).grid(
+        ttk.Button(btn_frame, text="列印小白單", command=self._print_receipt).grid(
             row=0, column=2, padx=4, pady=4, sticky="ew"
         )
+        ttk.Button(btn_frame, text="重印上一筆", command=self._reprint_last_receipt).grid(
+            row=0, column=3, padx=4, pady=4, sticky="ew"
+        )
+        ttk.Button(btn_frame, text="結帳", command=self._checkout).grid(
+            row=0, column=4, padx=4, pady=4, sticky="ew"
+        )
 
+        self._refresh_printers()
         self._update_total()
         self._refresh_order_details()
 
@@ -152,6 +190,116 @@ class BreakfastOrderSystem:
                 details.append((name, qty, subtotal))
                 total += subtotal
         return details, total
+
+    def _build_receipt_text(self, details: list[tuple[str, int, int]], total: int) -> str:
+        order_no = f"{self.order_counter:04d}"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        width = self.receipt_paper_width
+        separator = "-" * width
+
+        def fit_left(text: str, size: int) -> str:
+            short = text[:size]
+            return short + (" " * max(0, size - len(short)))
+
+        lines = [
+            "早餐店點餐單".center(width),
+            f"單號: {order_no}",
+            f"時間: {now}",
+            separator,
+            "品項           數量  小計",
+            separator,
+        ]
+
+        for name, qty, subtotal in details:
+            item_name = fit_left(name, 12)
+            qty_text = fit_left(f"x{qty}", 4)
+            subtotal_text = f"${subtotal:>5}"
+            lines.append(f"{item_name}{qty_text}{subtotal_text}")
+
+        lines.extend(
+            [
+                separator,
+                f"總計: ${total}",
+                "",
+                "謝謝光臨",
+                "\n",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _refresh_printers(self) -> None:
+        options = ["(使用預設印表機)"]
+        if win32print is not None:
+            flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+            for _, _, printer_name, _ in win32print.EnumPrinters(flags):
+                options.append(printer_name)
+
+        self.printer_combo["values"] = options
+        if self.printer_var.get() not in options:
+            self.printer_var.set(options[0])
+
+    def _send_to_printer(self, receipt_text: str) -> None:
+        if win32print is None:
+            raise RuntimeError(
+                "尚未安裝 pywin32，無法直接列印。\n請先執行：python -m pip install pywin32"
+            )
+
+        selected_name = self.printer_var.get().strip()
+        if selected_name == "(使用預設印表機)" or not selected_name:
+            printer_name = win32print.GetDefaultPrinter()
+        else:
+            printer_name = selected_name
+
+        if not printer_name:
+            raise RuntimeError("找不到預設印表機，請先在 Windows 設定預設印表機。")
+
+        raw_data = self._build_print_payload(receipt_text)
+        printer_handle = win32print.OpenPrinter(printer_name)
+        try:
+            win32print.StartDocPrinter(printer_handle, 1, ("Breakfast Order", None, "RAW"))
+            win32print.StartPagePrinter(printer_handle)
+            win32print.WritePrinter(printer_handle, raw_data)
+            win32print.EndPagePrinter(printer_handle)
+            win32print.EndDocPrinter(printer_handle)
+        finally:
+            win32print.ClosePrinter(printer_handle)
+
+    def _build_print_payload(self, receipt_text: str) -> bytes:
+        # 58mm receipt printers usually read plain RAW text with CRLF line endings.
+        payload = receipt_text.replace("\n", "\r\n").encode("cp950", errors="replace")
+        if self.auto_cut_var.get():
+            # Feed a few lines then issue ESC/POS full-cut command.
+            payload += b"\r\n\r\n\r\n" + b"\x1d\x56\x00"
+        return payload
+
+    def _print_receipt_text(self, receipt_text: str) -> None:
+        self._send_to_printer(receipt_text)
+        self.last_receipt_text = receipt_text
+
+    def _reprint_last_receipt(self) -> None:
+        if not self.last_receipt_text:
+            messagebox.showwarning("提醒", "目前沒有上一筆可重印的訂單。")
+            return
+
+        try:
+            self._print_receipt_text(self.last_receipt_text)
+            messagebox.showinfo("列印成功", "已重新送出上一筆訂單。")
+        except Exception as exc:
+            messagebox.showerror("列印失敗", f"無法列印：\n{exc}")
+
+    def _print_receipt(self) -> None:
+        self._normalize_quantity()
+        details, total = self._collect_order()
+        if not details:
+            messagebox.showwarning("提醒", "目前沒有可列印的訂單。")
+            return
+
+        receipt_text = self._build_receipt_text(details, total)
+        try:
+            self._print_receipt_text(receipt_text)
+            messagebox.showinfo("列印成功", "已送出列印。")
+        except Exception as exc:
+            messagebox.showerror("列印失敗", f"無法列印：\n{exc}")
 
     def _update_total(self) -> None:
         details, total = self._collect_order()
@@ -195,6 +343,14 @@ class BreakfastOrderSystem:
             "結帳完成",
             f"訂單如下：\n\n{summary}\n\n總金額：${total}\n\n謝謝光臨！",
         )
+        if messagebox.askyesno("列印出單", "是否要列印這筆訂單？"):
+            receipt_text = self._build_receipt_text(details, total)
+            try:
+                self._print_receipt_text(receipt_text)
+                messagebox.showinfo("列印成功", "已送出列印。")
+            except Exception as exc:
+                messagebox.showerror("列印失敗", f"無法列印：\n{exc}")
+        self.order_counter += 1
         self._clear_order()
 
 
